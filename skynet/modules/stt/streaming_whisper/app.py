@@ -11,21 +11,28 @@ app = FastAPI()  # No need for CORS middleware
 
 
 @app.websocket('/ws/{meeting_id}')
-async def websocket_endpoint(websocket: WebSocket, meeting_id: str, auth_token: str | None = None):
-    await ws_connection_manager.connect(websocket, meeting_id, auth_token)
+async def websocket_endpoint(
+    websocket: WebSocket,
+    meeting_id: str,
+    auth_token: str | None = None,
+    roomname: str | None = None,
+):
+    # If a Jitsi room name is provided, use it as the effective meeting identifier
+    effective_id = roomname if roomname else meeting_id
+    await ws_connection_manager.connect(websocket, effective_id, auth_token)
     try:
         while True:
             try:
                 chunk = await websocket.receive_bytes()
             except Exception as err:
-                log.warning(f'Expected bytes, received something else, disconnecting {meeting_id}. Error: \n{err}')
-                ws_connection_manager.disconnect(meeting_id)
+                log.warning(f'Expected bytes, received something else, disconnecting {effective_id}. Error: \n{err}')
+                ws_connection_manager.disconnect(effective_id)
                 break
             if len(chunk) == 1 and ord(b'' + chunk) == 0:
-                log.info(f'Received disconnect message for {meeting_id}')
-                ws_connection_manager.disconnect(meeting_id)
+                log.info(f'Received disconnect message for {effective_id}')
+                ws_connection_manager.disconnect(effective_id)
                 break
-            await ws_connection_manager.process(meeting_id, chunk, utils.now())
+            await ws_connection_manager.process(effective_id, chunk, utils.now())
     except WebSocketDisconnect:
-        ws_connection_manager.disconnect(meeting_id)
-        log.info(f'Meeting {meeting_id} has ended')
+        ws_connection_manager.disconnect(effective_id)
+        log.info(f'Meeting {effective_id} has ended')
