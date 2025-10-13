@@ -5,7 +5,6 @@ from typing import List
 
 from skynet.env import (
     whisper_return_transcribed_audio as return_audio,
-    git c,
     vad_min_speech_duration
 )
 
