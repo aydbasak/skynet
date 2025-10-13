@@ -48,6 +48,10 @@ class ConnectionManager:
         if results is not None:
             for result in results:
                 try:
+                    # Save transcript to file if enabled
+                    utils.save_transcript_to_file(meeting_id, result)
+                    
+                    # Send via websocket
                     await self.connections[meeting_id].ws.send_json(result.model_dump())
                 except WebSocketDisconnect as e:
                     log.warning(f'Meeting {meeting_id}: the connection was closed before sending all results: {e}')
