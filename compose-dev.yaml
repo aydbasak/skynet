@@ -2,7 +2,14 @@ services:
   web:
     build: .
     platform: linux/amd64
-    user: "0:0"  # Root user to avoid permission issues
+    user: "0:0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     ports:
       - "8000:8000"
       - "8001:8001"
@@ -15,33 +22,41 @@ services:
       - METRICS_PORT=8001
       - BYPASS_AUTHORIZATION=1
       - ENABLED_MODULES=streaming_whisper
-      - WHISPER_DEVICE=cpu
-      - WHISPER_MODEL_NAME=medium
+      # GPU Settings
+      - WHISPER_DEVICE=cuda
+      - WHISPER_MODEL_NAME=large-v3
+      - WHISPER_LANGUAGE=tr
       - WHISPER_MODEL_PATH=/models/streaming-whisper
       - WHISPER_TASK=transcribe
+      # Quality Settings
       - BEAM_SIZE=5
-      - WHISPER_CHUNK_MS=2000
-      - WHISPER_STRIDE_MS=300
+      - WHISPER_CHUNK_MS=3000
+      - WHISPER_STRIDE_MS=500
       - WHISPER_STREAM_PARTIAL=true
+      - WHISPER_MIN_PROBABILITY=0.6
+      # VAD Settings
       - STREAMING_WHISPER_VAD_BACKEND=webrtc
       - STREAMING_WHISPER_VAD_MODE=2
       - STREAMING_WHISPER_WINDOW_SIZE_SAMPLES=320
       - STREAMING_WHISPER_MIN_SILENCE_DURATION_MS=400
       - STREAMING_WHISPER_SPEECH_PAD_MS=300
+      - VAD_THRESHOLD=0.5
+      - VAD_MIN_SPEECH_DURATION=0.1
+      - VAD_MIN_SILENCE_DURATION=0.5
+      # Transcript Save Settings
       - STREAMING_WHISPER_SAVE_TRANSCRIPTS=true
       - STREAMING_WHISPER_OUTPUT_DIR=/opt/transcripts
       - STREAMING_WHISPER_OUTPUT_FORMATS=jsonl,srt
       - STREAMING_WHISPER_FLUSH_INTERVAL_MS=5000
-      - WHISPER_MIN_PROBABILITY=0.8
       # Transcript Status API (change URL per environment)
       - TRANSCRIPT_STATUS_API_URL=https://oceaneye-be.normdigital.net
       - TRANSCRIPT_STATUS_API_KEY=VG7NPpMIUFnNQbDPKfOPmgM2ixUOS9RZDzfLZsnxKHUmiSwyPHHJf0cme8Bmwn9OnQCuWwLM6lul
       - TRANSCRIPT_STATUS_API_ENABLED=true
       # MinIO/S3 Configuration (change per environment)
-      - SKYNET_S3_ENDPOINT=http://minio:9000
-      - SKYNET_S3_BUCKET=transcripts
-      - SKYNET_S3_ACCESS_KEY=minioadmin
-      - SKYNET_S3_SECRET_KEY=minioadmin
+      - SKYNET_S3_ENDPOINT=https://minio.normdigital.net
+      - SKYNET_S3_BUCKET=eye-transcripts
+      - SKYNET_S3_ACCESS_KEY=admin
+      - SKYNET_S3_SECRET_KEY=uZ5sZohwtIjBju!9
       - SKYNET_S3_REGION=us-east-1
 
   redis:
