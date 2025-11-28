@@ -9,6 +9,7 @@ from skynet.logs import get_logger
 from skynet.modules.monitoring import dec_ws_conn_count, inc_ws_conn_count
 from skynet.modules.stt.streaming_whisper.meeting_connection import MeetingConnection
 from skynet.modules.stt.streaming_whisper.utils import utils
+from skynet.modules.stt.streaming_whisper import transcript_status
 
 log = get_logger(__name__)
 
@@ -21,20 +22,25 @@ class ConnectionManager:
         self.connections: dict[str, MeetingConnection] = {}
         self.flush_audio_task = None
 
-    async def connect(self, websocket: WebSocket, meeting_id: str, auth_token: str | None):
+    async def connect(self, websocket: WebSocket, meeting_id: str, auth_token: str | None) -> bool:
         if not bypass_auth:
             jwt_token = utils.get_jwt(websocket.headers, auth_token)
             authorized = await authorize(jwt_token)
             if not authorized:
                 await websocket.close(401, 'Bad JWT token')
-                return
+                return False
         await websocket.accept()
         self.connections[meeting_id] = MeetingConnection(websocket)
         if self.flush_audio_task is None:
             loop = asyncio.get_running_loop()
             self.flush_audio_task = loop.create_task(self.flush_working_audio_worker())
         inc_ws_conn_count()
+
+        # Notify external API that transcript has started
+        await transcript_status.start_transcript(meeting_id)
+
         log.info(f'Meeting with id {meeting_id} started. Ongoing meetings {len(self.connections)}')
+        return True
 
     async def process(self, meeting_id: str, chunk: bytes, chunk_timestamp: int):
         log.debug(f'Processing chunk for meeting {meeting_id}')
@@ -55,11 +61,54 @@ class ConnectionManager:
                     await self.connections[meeting_id].ws.send_json(result.model_dump())
                 except WebSocketDisconnect as e:
                     log.warning(f'Meeting {meeting_id}: the connection was closed before sending all results: {e}')
-                    self.disconnect(meeting_id)
+                    raise  # Re-raise to trigger graceful_disconnect in app.py
                 except Exception as ex:
                     log.error(f'Meeting {meeting_id}: exception while sending transcription results {ex}')
 
+    async def graceful_disconnect(self, meeting_id: str, success: bool = True):
+        """
+        Gracefully disconnect a meeting:
+        1. Flush all remaining audio from participants
+        2. Upload transcripts to MinIO
+        3. Notify external API
+        4. Clean up connection
+        """
+        if meeting_id not in self.connections:
+            log.warning(f'Meeting {meeting_id} not found for graceful disconnect')
+            return
+
+        log.info(f'Graceful disconnect started for meeting {meeting_id}')
+
+        try:
+            # Force transcription for all participants with remaining audio
+            connection = self.connections[meeting_id]
+            for participant_id in list(connection.participants.keys()):
+                state = connection.participants[participant_id]
+                if len(state.working_audio) > 0 and not state.is_transcribing:
+                    log.info(f'Flushing remaining audio for participant {participant_id} in meeting {meeting_id}')
+                    results = await connection.force_transcription(participant_id)
+                    if results:
+                        # Save to file but don't send via websocket (connection may be closed)
+                        for result in results:
+                            utils.save_transcript_to_file(meeting_id, result)
+
+            # Upload transcripts to MinIO
+            await transcript_status.upload_transcripts_to_minio(meeting_id)
+
+            # Notify external API that transcript has finished
+            await transcript_status.finish_transcript(meeting_id, success)
+
+        except Exception as e:
+            log.error(f'Error during graceful disconnect for {meeting_id}: {e}')
+            # Still try to notify API about failure
+            await transcript_status.finish_transcript(meeting_id, success=False)
+
+        finally:
+            # Clean up connection
+            self.disconnect(meeting_id)
+
     def disconnect(self, meeting_id: str):
+        """Remove meeting connection from manager."""
         try:
             del self.connections[meeting_id]
         except KeyError:
@@ -73,15 +122,29 @@ class ConnectionManager:
         to the next utterance when the participant resumes speaking.
         """
         while True:
-            for meeting_id in self.connections:
-                for participant in self.connections[meeting_id].participants:
-                    state = self.connections[meeting_id].participants[participant]
-                    diff = utils.now() - state.last_received_chunk
-                    log.debug(
-                        f'Participant {participant} in meeting {meeting_id} has been silent for {diff} ms and has {len(state.working_audio)} bytes of audio'
-                    )
-                    if diff > whisper_flush_interval and len(state.working_audio) > 0 and not state.is_transcribing:
-                        log.info(f'Forcing a transcription in meeting {meeting_id} for {participant}')
-                        results = await self.connections[meeting_id].force_transcription(participant)
-                        await self.send(meeting_id, results)
+            # Copy keys to avoid dict size change during iteration
+            meeting_ids = list(self.connections.keys())
+            for meeting_id in meeting_ids:
+                if meeting_id not in self.connections:
+                    continue
+                try:
+                    participant_ids = list(self.connections[meeting_id].participants.keys())
+                    for participant in participant_ids:
+                        if meeting_id not in self.connections:
+                            break
+                        if participant not in self.connections[meeting_id].participants:
+                            continue
+                        state = self.connections[meeting_id].participants[participant]
+                        diff = utils.now() - state.last_received_chunk
+                        log.debug(
+                            f'Participant {participant} in meeting {meeting_id} has been silent for {diff} ms and has {len(state.working_audio)} bytes of audio'
+                        )
+                        if diff > whisper_flush_interval and len(state.working_audio) > 0 and not state.is_transcribing:
+                            log.info(f'Forcing a transcription in meeting {meeting_id} for {participant}')
+                            results = await self.connections[meeting_id].force_transcription(participant)
+                            await self.send(meeting_id, results)
+                except WebSocketDisconnect:
+                    log.warning(f'WebSocket disconnected during flush for meeting {meeting_id}')
+                except Exception as e:
+                    log.error(f'Error during flush for meeting {meeting_id}: {e}')
             await asyncio.sleep(1)

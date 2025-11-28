@@ -6,6 +6,8 @@ It is comprised of specialized modules which can be enabled or disabled as neede
 
 - **Summary and Action Items** with vllm (or Ollama)
 - **Live Transcriptions** with Faster Whisper via websockets
+  - Automatic transcript upload to MinIO/S3
+  - External API notifications for transcript lifecycle
 - **RAG Assistant**
 - 🚧 _More to follow_
 

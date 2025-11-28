@@ -60,5 +60,24 @@ class S3:
         except Exception as e:
             log.error(f'Failed to delete file {filename} from S3: {e}')
 
+    async def upload_file_with_key(self, local_path: str, s3_key: str) -> bool:
+        """Upload a local file to S3 with a custom key (path in bucket)."""
+        try:
+            async with self.session.resource(
+                's3',
+                endpoint_url=skynet_s3_endpoint,
+                config=Config(
+                    request_checksum_calculation='WHEN_REQUIRED', response_checksum_validation='WHEN_REQUIRED'
+                ),
+            ) as s3:
+                bucket = await s3.Bucket(skynet_s3_bucket)
+                with open(local_path, 'rb') as data:
+                    await bucket.upload_fileobj(data, s3_key)
+                    log.info(f'Uploaded file to S3: {local_path} -> {s3_key}')
+                return True
+        except Exception as e:
+            log.error(f'Failed to upload file {local_path} to S3 key {s3_key}: {e}')
+            return False
+
 
 __all__ = ['S3']

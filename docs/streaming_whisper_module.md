@@ -162,6 +162,75 @@ huggingface-cli login
 huggingface-cli download openai/whisper-tiny.en --repo-type model --cache-dir $HOME/my-models-folder/streaming-whisper
 ```
 
+## Transcript Status API Integration
+
+Skynet can notify an external API when transcription starts and finishes. This is useful for tracking transcript lifecycle.
+
+### Configuration
+
+```bash
+# Enable transcript status notifications
+export TRANSCRIPT_STATUS_API_URL=https://your-api.example.com
+export TRANSCRIPT_STATUS_API_ENABLED=true
+```
+
+### API Endpoints Called
+
+**StartTranscript** - Called when WebSocket connection is established:
+```
+POST {TRANSCRIPT_STATUS_API_URL}/api/TranscriptStatus/StartTranscript
+{
+  "SessionId": "meeting_id",
+  "RecordPath": "bucket_name",
+  "TranscriptionModel": "whisper_model_name",
+  "TranscriptPath": "{session_id}/transcript/{session_id}.srt"
+}
+```
+
+**FinishTranscript** - Called when meeting ends or fails:
+```
+POST {TRANSCRIPT_STATUS_API_URL}/api/TranscriptStatus/FinishTranscript
+{
+  "Id": "transcript_status_id_from_start_response",
+  "IsSuccess": true|false
+}
+```
+
+## MinIO/S3 Transcript Upload
+
+Transcripts can be automatically uploaded to MinIO/S3 when a meeting ends.
+
+### Configuration
+
+```bash
+export SKYNET_S3_ENDPOINT=http://minio:9000
+export SKYNET_S3_BUCKET=transcripts
+export SKYNET_S3_ACCESS_KEY=your_access_key
+export SKYNET_S3_SECRET_KEY=your_secret_key
+export SKYNET_S3_REGION=us-east-1
+```
+
+### File Structure in MinIO
+
+```
+{session_id}/
+├── raw_transcript/
+│   └── {session_id}.jsonl    # All interim + final transcriptions
+└── transcript/
+    └── {session_id}.srt      # Final transcriptions only (SRT format)
+```
+
+## Graceful Disconnect
+
+When a meeting ends (normally or abruptly), Skynet will:
+
+1. Flush all remaining audio from participants to ensure no transcript is lost
+2. Save transcripts to local files
+3. Upload transcripts to MinIO/S3 (if configured)
+4. Notify external API via FinishTranscript (if configured)
+
+This prevents the last 1-2 minutes of transcript from being lost during sudden disconnections.
+
 ## Run
 
 ```bash
@@ -171,6 +240,13 @@ docker run -p 8000:8000 \
 -e "WHISPER_MODEL_PATH=/models/streaming-whisper" \
 -e "ENABLED_MODULES=streaming_whisper" \
 -e "BYPASS_AUTHORIZATION=1" \
+-e "TRANSCRIPT_STATUS_API_URL=https://your-api.example.com" \
+-e "TRANSCRIPT_STATUS_API_ENABLED=true" \
+-e "SKYNET_S3_ENDPOINT=http://minio:9000" \
+-e "SKYNET_S3_BUCKET=transcripts" \
+-e "SKYNET_S3_ACCESS_KEY=minioadmin" \
+-e "SKYNET_S3_SECRET_KEY=minioadmin" \
+-e "SKYNET_S3_REGION=us-east-1" \
 -v "$HOME/my-models-folder":"/models" \
 your-registry/skynet:your-tag
 ```

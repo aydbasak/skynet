@@ -172,3 +172,7 @@ skynet_s3_endpoint = os.environ.get('SKYNET_S3_ENDPOINT')
 skynet_s3_region = os.environ.get('SKYNET_S3_REGION')
 skynet_s3_secret_key = os.environ.get('SKYNET_S3_SECRET_KEY')
 use_s3 = all([skynet_s3_access_key, skynet_s3_secret_key, skynet_s3_bucket, skynet_s3_endpoint, skynet_s3_region])
+
+# transcript status api
+transcript_status_api_url = os.environ.get('TRANSCRIPT_STATUS_API_URL')
+transcript_status_api_enabled = tobool(os.environ.get('TRANSCRIPT_STATUS_API_ENABLED', 'false'))
