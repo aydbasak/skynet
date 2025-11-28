@@ -77,6 +77,7 @@ Skynet is configurable via environment variables. Some are shared by all modules
 | Name                             | **Description**                                                                                                                                    | **Default**                         | **Available values** |
 |----------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------|----------------------|
 | `TRANSCRIPT_STATUS_API_URL`      | Base URL for transcript status notifications API                                                                                                   | NULL                                | N/A                  |
+| `TRANSCRIPT_STATUS_API_KEY`      | API key for authentication (sent as X-API-Key header)                                                                                              | NULL                                | N/A                  |
 | `TRANSCRIPT_STATUS_API_ENABLED`  | Enable transcript status API notifications                                                                                                         | `false`                             | `true`, `false`      |
 
 ## Streaming Whisper Module Environment Variables

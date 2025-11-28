@@ -11,6 +11,7 @@ from typing import Optional
 
 from skynet.env import (
     transcript_status_api_url,
+    transcript_status_api_key,
     transcript_status_api_enabled,
     streaming_whisper_output_dir,
     whisper_model_name,
@@ -37,6 +38,7 @@ async def start_transcript(session_id: str) -> Optional[str]:
 
     try:
         url = f'{transcript_status_api_url}/api/TranscriptStatus/StartTranscript'
+        headers = {'X-API-Key': transcript_status_api_key} if transcript_status_api_key else {}
         payload = {
             'SessionId': session_id,
             'RecordPath': skynet_s3_bucket or '',
@@ -45,7 +47,7 @@ async def start_transcript(session_id: str) -> Optional[str]:
         }
 
         log.info(f'Calling StartTranscript API for session {session_id}')
-        response = await http_client.post(url, json=payload)
+        response = await http_client.post(url, json=payload, headers=headers)
 
         transcript_id = response.get('Id') if isinstance(response, dict) else None
         if transcript_id:
@@ -76,13 +78,14 @@ async def finish_transcript(session_id: str, success: bool = True) -> bool:
 
     try:
         url = f'{transcript_status_api_url}/api/TranscriptStatus/FinishTranscript'
+        headers = {'X-API-Key': transcript_status_api_key} if transcript_status_api_key else {}
         payload = {
             'Id': transcript_id,
             'IsSuccess': success
         }
 
         log.info(f'Calling FinishTranscript API for session {session_id}, success={success}')
-        await http_client.post(url, json=payload)
+        await http_client.post(url, json=payload, headers=headers)
 
         # Clean up stored ID
         _transcript_status_ids.pop(session_id, None)
