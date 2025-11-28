@@ -44,7 +44,7 @@ async def start_transcript(session_id: str) -> Optional[str]:
         payload = {
             'SessionId': session_id,
             'RecordPath': skynet_s3_bucket or '',
-            'TranscriptionModel': whisper_model_name or 'whisper',
+            'TransciptionModel': whisper_model_name or 'whisper',
             'TranscriptPath': f'{session_id}/transcript/{session_id}.srt'
         }
 
@@ -63,7 +63,9 @@ async def start_transcript(session_id: str) -> Optional[str]:
                 # Try to parse JSON response
                 try:
                     response = json.loads(response_text) if response_text else {}
-                    transcript_id = response.get('Id') if isinstance(response, dict) else None
+                    # API returns: { "data": { "id": "..." }, "success": true, ... }
+                    data = response.get('data', {}) if isinstance(response, dict) else {}
+                    transcript_id = data.get('id') if isinstance(data, dict) else None
                 except json.JSONDecodeError:
                     log.warning(f'Could not parse JSON response: {response_text}')
                     transcript_id = None
