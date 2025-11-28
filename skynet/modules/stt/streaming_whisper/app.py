@@ -22,6 +22,11 @@ async def websocket_endpoint(
     
     # If a Jitsi room name is provided, use it as the effective meeting identifier
     effective_id = roomname if roomname else meeting_id
+    
+    # Remove MUC domain suffix (e.g., @muc.jitsi.example.com) to get clean session ID
+    if '@' in effective_id:
+        effective_id = effective_id.split('@')[0]
+    
     log.info(f'Using effective_id: {effective_id}')
     
     connected = await ws_connection_manager.connect(websocket, effective_id, auth_token)
