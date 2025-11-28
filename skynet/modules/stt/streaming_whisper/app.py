@@ -17,8 +17,13 @@ async def websocket_endpoint(
     auth_token: str | None = None,
     roomname: str | None = None,
 ):
+    # Log incoming parameters for debugging
+    log.info(f'WebSocket params: meeting_id={meeting_id}, roomname={roomname}')
+    
     # If a Jitsi room name is provided, use it as the effective meeting identifier
     effective_id = roomname if roomname else meeting_id
+    log.info(f'Using effective_id: {effective_id}')
+    
     connected = await ws_connection_manager.connect(websocket, effective_id, auth_token)
     if not connected:
         return
