@@ -6,8 +6,11 @@ Handles:
 2. Uploading transcript files to MinIO/S3
 """
 
+import json
 from pathlib import Path
 from typing import Optional
+
+import aiohttp
 
 from skynet.env import (
     transcript_status_api_url,
@@ -19,7 +22,6 @@ from skynet.env import (
     use_s3,
 )
 from skynet.logs import get_logger
-from skynet import http_client
 
 log = get_logger(__name__)
 
@@ -38,7 +40,7 @@ async def start_transcript(session_id: str) -> Optional[str]:
 
     try:
         url = f'{transcript_status_api_url}/api/TranscriptStatus/StartTranscript'
-        headers = {'X-API-Key': transcript_status_api_key} if transcript_status_api_key else {}
+        headers = {'X-API-Key': transcript_status_api_key, 'Content-Type': 'application/json'} if transcript_status_api_key else {'Content-Type': 'application/json'}
         payload = {
             'SessionId': session_id,
             'RecordPath': skynet_s3_bucket or '',
@@ -47,14 +49,30 @@ async def start_transcript(session_id: str) -> Optional[str]:
         }
 
         log.info(f'Calling StartTranscript API for session {session_id}')
-        response = await http_client.post(url, json=payload, headers=headers)
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                status = resp.status
+                response_text = await resp.text()
+                log.debug(f'StartTranscript response: status={status}, body={response_text}')
+                
+                if status >= 400:
+                    log.error(f'StartTranscript API returned error {status}: {response_text}')
+                    return None
+                
+                # Try to parse JSON response
+                try:
+                    response = json.loads(response_text) if response_text else {}
+                    transcript_id = response.get('Id') if isinstance(response, dict) else None
+                except json.JSONDecodeError:
+                    log.warning(f'Could not parse JSON response: {response_text}')
+                    transcript_id = None
 
-        transcript_id = response.get('Id') if isinstance(response, dict) else None
         if transcript_id:
             _transcript_status_ids[session_id] = transcript_id
             log.info(f'StartTranscript successful for {session_id}, got ID: {transcript_id}')
         else:
-            log.warning(f'StartTranscript response missing Id for {session_id}: {response}')
+            log.warning(f'StartTranscript response missing Id for {session_id}')
 
         return transcript_id
 
@@ -78,14 +96,24 @@ async def finish_transcript(session_id: str, success: bool = True) -> bool:
 
     try:
         url = f'{transcript_status_api_url}/api/TranscriptStatus/FinishTranscript'
-        headers = {'X-API-Key': transcript_status_api_key} if transcript_status_api_key else {}
+        headers = {'X-API-Key': transcript_status_api_key, 'Content-Type': 'application/json'} if transcript_status_api_key else {'Content-Type': 'application/json'}
         payload = {
             'Id': transcript_id,
             'IsSuccess': success
         }
 
         log.info(f'Calling FinishTranscript API for session {session_id}, success={success}')
-        await http_client.post(url, json=payload, headers=headers)
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                status = resp.status
+                response_text = await resp.text()
+                log.debug(f'FinishTranscript response: status={status}, body={response_text}')
+                
+                if status >= 400:
+                    log.error(f'FinishTranscript API returned error {status}: {response_text}')
+                    _transcript_status_ids.pop(session_id, None)
+                    return False
 
         # Clean up stored ID
         _transcript_status_ids.pop(session_id, None)
