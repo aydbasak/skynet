@@ -29,27 +29,27 @@ services:
       - WHISPER_MODEL_PATH=/models/streaming-whisper
       - WHISPER_TASK=transcribe
       # Quality Settings
-      - BEAM_SIZE=5
-      - WHISPER_CHUNK_MS=3000
-      - WHISPER_STRIDE_MS=500
+      - BEAM_SIZE=8
+      - WHISPER_CHUNK_MS=5000
+      - WHISPER_STRIDE_MS=1000
       - WHISPER_STREAM_PARTIAL=true
-      - WHISPER_MIN_PROBABILITY=0.6
+      - WHISPER_MIN_PROBABILITY=0.5
       # VAD Settings
       - STREAMING_WHISPER_VAD_BACKEND=webrtc
       - STREAMING_WHISPER_VAD_MODE=2
       - STREAMING_WHISPER_WINDOW_SIZE_SAMPLES=320
-      - STREAMING_WHISPER_MIN_SILENCE_DURATION_MS=400
+      - STREAMING_WHISPER_MIN_SILENCE_DURATION_MS=600
       - STREAMING_WHISPER_SPEECH_PAD_MS=300
-      - VAD_THRESHOLD=0.5
+      - VAD_THRESHOLD=0.4
       - VAD_MIN_SPEECH_DURATION=0.1
-      - VAD_MIN_SILENCE_DURATION=0.5
+      - VAD_MIN_SILENCE_DURATION=0.8
       # Transcript Save Settings
       - STREAMING_WHISPER_SAVE_TRANSCRIPTS=true
       - STREAMING_WHISPER_OUTPUT_DIR=/opt/transcripts
       - STREAMING_WHISPER_OUTPUT_FORMATS=jsonl,srt
-      - STREAMING_WHISPER_FLUSH_INTERVAL_MS=5000
+      - STREAMING_WHISPER_FLUSH_INTERVAL_MS=7000
       # Transcript Status API (change URL per environment)
-      - TRANSCRIPT_STATUS_API_URL=https://oceaneye-be.normdigital.net
+      - TRANSCRIPT_STATUS_API_URL=https://pharmaveritaseye-be.normdigital.net
       - TRANSCRIPT_STATUS_API_KEY=VG7NPpMIUFnNQbDPKfOPmgM2ixUOS9RZDzfLZsnxKHUmiSwyPHHJf0cme8Bmwn9OnQCuWwLM6lul
       - TRANSCRIPT_STATUS_API_ENABLED=true
       # MinIO/S3 Configuration (change per environment)
