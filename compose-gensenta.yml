@@ -25,7 +25,6 @@ services:
     volumes:
       - ./models/streaming-whisper:/models/streaming-whisper
       - skynet-transcripts:/opt/transcripts
-      - /opt/gensenta/ssl/ca-bundle.crt:/etc/ssl/certs/ca-certificates.crt:ro
     environment:
       - LD_LIBRARY_PATH=/app/.venv/lib/python3.11/site-packages/nvidia/cudnn/lib:/app/.venv/lib/python3.11/site-packages/nvidia/cublas/lib
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
