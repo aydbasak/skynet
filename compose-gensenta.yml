@@ -1,0 +1,95 @@
+# Skynet Whisper Transcription Service — Gensenta Test Environment
+# Server: 172.17.1.16 (GenAI Sord — NVIDIA H100L MIG 3g.47gb)
+# Prerequisites: NVIDIA driver 580+ and nvidia-container-toolkit must be installed on host
+# Usage: docker compose -f compose-gensenta.yml up --build -d
+
+services:
+  skynet-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.gensenta
+    platform: linux/amd64
+    container_name: skynet-web-test
+    user: "0:0"
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['MIG-54e5eb4a-5298-51eb-8f2f-27edb2e74ee5']
+              capabilities: [gpu]
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    volumes:
+      - ./models/streaming-whisper:/models/streaming-whisper
+      - skynet-transcripts:/opt/transcripts
+      - /opt/gensenta/ssl/ca-bundle.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    environment:
+      - LD_LIBRARY_PATH=/app/.venv/lib/python3.11/site-packages/nvidia/cudnn/lib:/app/.venv/lib/python3.11/site-packages/nvidia/cublas/lib
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - REDIS_HOST=skynet-redis
+      - HTTP_PORT=8000
+      - METRICS_PORT=8001
+      - BYPASS_AUTHORIZATION=1
+      - ENABLED_MODULES=streaming_whisper
+      # GPU / MIG device (H100 shared — specific MIG instance)
+      - NVIDIA_VISIBLE_DEVICES=MIG-54e5eb4a-5298-51eb-8f2f-27edb2e74ee5
+      # Whisper Settings (GPU mode — NVIDIA H100 MIG)
+      - WHISPER_DEVICE=cuda
+      - WHISPER_MODEL_NAME=large-v3
+      - WHISPER_MODEL_PATH=/models/streaming-whisper
+      # Quality Settings
+      - BEAM_SIZE=8
+      - WHISPER_CHUNK_MS=5000
+      - WHISPER_STRIDE_MS=1000
+      - WHISPER_STREAM_PARTIAL=true
+      - WHISPER_MIN_PROBABILITY=0.5
+      # VAD Settings
+      - STREAMING_WHISPER_VAD_BACKEND=webrtc
+      - STREAMING_WHISPER_VAD_MODE=2
+      - STREAMING_WHISPER_WINDOW_SIZE_SAMPLES=320
+      - STREAMING_WHISPER_MIN_SILENCE_DURATION_MS=600
+      - STREAMING_WHISPER_SPEECH_PAD_MS=300
+      - VAD_THRESHOLD=0.4
+      - VAD_MIN_SPEECH_DURATION=0.1
+      - VAD_MIN_SILENCE_DURATION=0.8
+      # Transcript Save Settings
+      - STREAMING_WHISPER_SAVE_TRANSCRIPTS=true
+      - STREAMING_WHISPER_OUTPUT_DIR=/opt/transcripts
+      - STREAMING_WHISPER_OUTPUT_FORMATS=jsonl,srt
+      - STREAMING_WHISPER_FLUSH_INTERVAL_MS=7000
+      # Transcript Status API (PharmaVeritas backend via nginx)
+      - TRANSCRIPT_STATUS_API_URL=https://test-veritas.gensenta.com.tr/eye
+      - TRANSCRIPT_STATUS_API_KEY=SPL6D0mUpgBC5WRoqNploAzaVj8pFSThvuBluFpUqNE1kaRMVCQ9lZETdw0yM6QF6NzTLcibRHk6I5vV
+      - TRANSCRIPT_STATUS_API_ENABLED=true
+      # SeaweedFS/S3 Configuration
+      - SKYNET_S3_ENDPOINT=https://test-storage.gensenta.com.tr
+      - SKYNET_S3_BUCKET=eye-transcripts
+      - SKYNET_S3_ACCESS_KEY=SWFS_APPUSER_3N7Q1R5
+      - SKYNET_S3_SECRET_KEY=mT4wE6rY8uI0oP2aS4dF6gH8jK0lZ1xC3vB5nM7q
+      - SKYNET_S3_REGION=us-east-1
+      # SSL CA Bundle (SeaweedFS intermediate cert fix)
+      - REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+      - SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+    depends_on:
+      - skynet-redis
+    restart: unless-stopped
+    networks:
+      - skynet-net
+
+  skynet-redis:
+    image: redis:alpine
+    platform: linux/amd64
+    container_name: skynet-redis-test
+    restart: unless-stopped
+    networks:
+      - skynet-net
+
+networks:
+  skynet-net:
+    driver: bridge
+
+volumes:
+  skynet-transcripts:

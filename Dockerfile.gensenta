@@ -1,0 +1,151 @@
+ARG BASE_IMAGE_BUILD=ubuntu:22.04
+ARG BASE_IMAGE_RUN=ubuntu:22.04
+
+## Base Image
+
+FROM ${BASE_IMAGE_BUILD} AS builder
+ARG BUILD_WITH_VLLM=0
+
+# Install CA certificates first (Gensenta corporate SSL)
+RUN \
+    apt-get update && \
+    apt-get install -y apt-transport-https ca-certificates
+
+COPY ca-bundle.crt /usr/local/share/ca-certificates/gensenta.crt
+RUN update-ca-certificates
+
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+COPY docker/rootfs/ /
+
+RUN \
+    apt-dpkg-wrap apt-get update && \
+    apt-dpkg-wrap apt-get install -y build-essential python3.11 python3.11-venv
+
+
+COPY requirements*.txt /app/
+COPY pyproject.toml /app/
+COPY skynet /app/skynet
+
+WORKDIR /app
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=on
+ENV PIP_DEFAULT_TIMEOUT=300
+
+RUN \
+    python3.11 -m venv .venv && \
+    . .venv/bin/activate && \
+    if [ "$BUILD_WITH_VLLM" = "1" ]; then \
+        echo "Building with VLLM"; \
+        pip install --timeout 300 -r requirements-vllm.txt . ; \
+    else \
+        echo "Building without VLLM"; \
+        pip install --timeout 300 -r requirements.txt . ; \
+    fi
+
+# Install uvicorn[standard] extras for WebSocket support (httptools, uvloop, websockets).
+# Also extract cuDNN 8 compat .so files (libcudnn_ops_infer.so.8 etc.) needed by ctranslate2,
+# without replacing cuDNN 9 which torch requires. Both coexist: torch uses .so.9 names,
+# ctranslate2 uses .so.8 names — the LD_LIBRARY_PATH below covers both.
+RUN \
+    . .venv/bin/activate && \
+    pip install --timeout 300 websockets httptools uvloop && \
+    pip install --timeout 600 --target /tmp/cudnn8 --no-deps nvidia-cudnn-cu12==8.9.7.29 && \
+    find /tmp/cudnn8/nvidia/cudnn/lib/ -name "libcudnn*.so.8*" \
+        -exec cp -d {} .venv/lib/python3.11/site-packages/nvidia/cudnn/lib/ \; && \
+    rm -rf /tmp/cudnn8
+
+## Build ffmpeg
+
+FROM builder AS ffmpeg_builder
+
+RUN \
+    apt-dpkg-wrap apt-get install -y \
+        autoconf \
+        automake \
+        libopus-dev \
+        libopus0 \
+        libtool \
+        pkg-config \
+        texinfo \
+        wget \
+        yasm \
+        zlib1g \
+        zlib1g-dev
+
+RUN \
+    mkdir -p /opt/ffmpeg && \
+    cd /opt/ && \
+    wget -q https://www.ffmpeg.org/releases/ffmpeg-6.1.2.tar.gz && \
+    tar -xzf ffmpeg-6.1.2.tar.gz -C /opt/ffmpeg --strip-components 1 && \
+    rm ffmpeg-6.1.2.tar.gz && \
+    cd /opt/ffmpeg/ && \
+    ./configure \
+      --enable-shared \
+      --enable-gpl \
+      --enable-libopus && \
+    JOBS="$(nproc)" && \
+    make -j "${JOBS}" && \
+    make install && \
+    ldconfig
+
+WORKDIR /copy_libs
+RUN cp -a /usr/local/lib/lib* ./
+
+## Production Image
+
+FROM ${BASE_IMAGE_RUN}
+
+COPY --chown=jitsi:jitsi docker/run-skynet.sh /opt/
+COPY --from=ffmpeg_builder /usr/local/include /usr/local/include
+COPY --from=ffmpeg_builder /copy_libs/ /usr/local/lib/
+COPY --from=ffmpeg_builder /usr/local/lib/pkgconfig /usr/local/lib/pkgconfig
+COPY --chown=jitsi:jitsi --from=builder /app/.venv /app/.venv
+
+# Install CA certificates in production image too
+RUN \
+    apt-get update && \
+    apt-get install -y apt-transport-https ca-certificates
+
+COPY ca-bundle.crt /usr/local/share/ca-certificates/gensenta.crt
+RUN update-ca-certificates
+
+COPY docker/rootfs/ /
+
+RUN \
+    apt-get update && \
+    apt-dpkg-wrap apt-get install -y python3.11 python3.11-venv tini libgomp1 libopus0 zlib1g strace gdb pandoc tesseract-ocr build-essential && \
+    apt-cleanup
+
+RUN \
+    groupadd -g 1001 jitsi && \
+    useradd -r -u 1001 -g jitsi jitsi
+
+ENV \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    TMPDIR=/app/tmp \
+    OUTLINES_CACHE_DIR=/app/vllm/outlines \
+    VLLM_CACHE_ROOT=/app/vllm/cache \
+    VLLM_CONFIG_ROOT=/app/vllm/config \
+    HF_HOME=/app/hf \
+    LD_LIBRARY_PATH=/app/.venv/lib/python3.11/site-packages/nvidia/cudnn/lib:/app/.venv/lib/python3.11/site-packages/nvidia/cublas/lib \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+VOLUME [ "/models" ]
+
+WORKDIR ${PYTHONPATH}
+RUN chown jitsi:jitsi ${PYTHONPATH}
+
+RUN mkdir -p /opt/transcripts && chown -R jitsi:jitsi /opt/transcripts
+
+EXPOSE 8000
+
+USER 1001
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+CMD ["/opt/run-skynet.sh"]
