@@ -1,0 +1,14 @@
+# Skynet — Gensenta REMOTE API mode image (used by compose-gensenta-api.yml).
+#
+# Layers only the application code on top of the image previously built from
+# Dockerfile.gensenta, so every runtime dependency (Python 3.11 venv, httpx,
+# silero, ffmpeg, CA bundle, run script) stays byte-identical to the image that
+# ran in production. A full rebuild (~14 GB, torch/CUDA wheels) is not needed
+# for API mode.
+#
+# The base image must exist on the host. If it does not, build it once with:
+#   docker build -f Dockerfile.gensenta -t skynet-skynet-web:latest .
+ARG BASE_IMAGE=skynet-skynet-web:latest
+FROM ${BASE_IMAGE}
+
+COPY skynet /app/skynet

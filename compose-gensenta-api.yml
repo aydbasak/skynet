@@ -12,9 +12,14 @@ services:
   skynet-web:
     build:
       context: .
-      dockerfile: Dockerfile.gensenta
+      # code-only layer on top of the existing Dockerfile.gensenta image
+      dockerfile: Dockerfile.gensenta-api
+      args:
+        BASE_IMAGE: ${SKYNET_BASE_IMAGE:-skynet-skynet-web:latest}
+    # separate tag so the base image (rollback / GPU mode) is never overwritten
+    image: skynet-skynet-web:api
     platform: linux/amd64
-    container_name: skynet-web
+    container_name: skynet-web-test
     user: "0:0"
     ports:
       - "8000:8000"
@@ -74,7 +79,7 @@ services:
   skynet-redis:
     image: redis:alpine
     platform: linux/amd64
-    container_name: skynet-redis
+    container_name: skynet-redis-test
     restart: unless-stopped
     networks:
       - skynet-net
