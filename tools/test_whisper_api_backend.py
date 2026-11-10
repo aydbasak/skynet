@@ -33,6 +33,9 @@ class H(BaseHTTPRequestHandler):
                  'segments': [{'start': 0.0, 'end': words[7]['end'], 'text': s1, 'avg_logprob': -0.15},
                               {'start': words[8]['start'], 'end': words[-1]['end'], 'text': s2, 'avg_logprob': -0.2}],
                  'words': words}
+            # like a real server: audio that ends inside the pause (<= 4.2 s) only contains s1
+            if len(body) / 32000 <= 4.2:
+                r = {'text': s1, 'segments': r['segments'][:1], 'words': words[:8]}
         elif m == 'segwords':
             # shape observed from Gensenta's gateway (whisper.cpp): top-level words empty,
             # sub-word tokens inside segments, a word split across segments ('kont'|'rol')
@@ -141,6 +144,51 @@ cut = utils.get_cut_mark_from_segment_probability(r)
 ok((cut.start, cut.end) == (r.words[9].end, r.words[10].start) == (5.0, 5.6),
    f'segwords: sentence cut after "konuştuk." ({cut.start}-{cut.end})')
 
+# 1c) cut snapping to real silence (imprecise remote word timestamps)
+from skynet.modules.stt.streaming_whisper.utils import api_client  # noqa: E402
+import struct  # noqa: E402
+
+
+def pcm(spec):  # [(seconds, amplitude)] -> s16le square-ish signal
+    out = b''
+    for secs, amp in spec:
+        n = int(16000 * secs)
+        out += b''.join(struct.pack('<h', amp if (k // 20) % 2 else -amp) for k in range(n))
+    return out
+
+
+speech_gap = pcm([(2.0, 4000), (0.3, 0), (2.0, 4000)])  # real pause at 2.0-2.3 s
+ok(api_client.snap_cut_to_quiet(speech_gap, 2.4) == 2.15, 'snap: cut moved into the real pause (2.4 -> 2.15)')
+ok(api_client.snap_cut_to_quiet(speech_gap, 3.5) is None, 'snap: no pause within 0.6 s -> do not cut')
+ok(api_client.snap_cut_to_quiet(pcm([(4.0, 4000)]), 2.0) is None, 'snap: continuous speech -> do not cut')
+ok(api_client.snap_cut_to_quiet(pcm([(2.0, 4000), (0.3, 40), (2.0, 4000)]), 2.0) == 2.15,
+   'snap: background noise in the pause still counts as quiet')
+
+# 1d) stock hallucinations (Gensenta returns them for silence with no_speech_prob=0)
+hal = {'text': ' İzlediğiniz için teşekkür ederim.\n',
+       'segments': [{'start': 0.0, 'end': 1.0, 'text': ' İzlediğiniz için teşekkür ederim.', 'avg_logprob': -0.06,
+                     'no_speech_prob': 0.0, 'words': [{'word': ' İzlediğiniz', 'start': 0.0, 'end': 0.5},
+                                                      {'word': ' için', 'start': 0.5, 'end': 1.0}]}], 'words': []}
+ok(api_client.normalise_response(hal, 1.0, 0.8) == ('', []), 'hallucination: silence phrase dropped')
+ok(api_client.is_hallucination('[Müzik]') and api_client.is_hallucination(' (alkış) '), 'hallucination: annotation-only dropped')
+ok(not api_client.is_hallucination('Toplantıya katıldığınız için teşekkür ederim.'), 'hallucination: real thanks kept')
+mixed = {'text': ' Günaydın. İzlediğiniz için teşekkür ederim.',
+         'segments': [{'start': 0, 'end': 1, 'text': ' Günaydın.', 'words': [{'word': ' Günaydın.', 'start': 0, 'end': 0.9}]},
+                      hal['segments'][0]], 'words': []}
+ok(api_client.normalise_response(mixed, 2.0, 0.8)[0] == 'Günaydın.', 'hallucination: only the bad segment is removed')
+
+# 1e) API mode never sends empty / very short buffers
+from skynet.modules.stt.streaming_whisper.state import State  # noqa: E402
+from skynet.modules.stt.streaming_whisper.chunk import Chunk  # noqa: E402
+
+n_calls = len(MODE['calls'])
+st = State('p', 'tr')
+silent = 'p|tr'.encode().ljust(60, b'\x00') + b'\x00\x00' * 4096
+VAD['speech'] = []
+asyncio.run(st.process(Chunk(silent, utils.now()), None))
+ok(len(MODE['calls']) == n_calls and asyncio.run(st.force_transcription(None)) is None and len(MODE['calls']) == n_calls,
+   'no request for an empty buffer (process + flush)')
+
 # 2) segments only
 MODE['v'] = 'segments'
 r = utils.transcribe([audio], 'tr', None)
@@ -156,9 +204,16 @@ async def flow():
     MODE['v'] = 'words'
     mc = MeetingConnection(ws=None)
 
+    n_chunk = {'i': 0}
+
     def chunk():
+        # 0.256 s of "speech", silent where the mocked API puts the sentence
+        # pause (3.55-4.4 s) so the cut can snap to real silence
         header = 'participant-1|tr'.encode().ljust(60, b'\x00')
-        return header + b'\x01\x00' * 4096  # 0.256 s
+        i = n_chunk['i']
+        n_chunk['i'] += 1
+        mid = (i + 0.5) * 0.256
+        return header + (b'\x00\x00' * 4096 if 3.6 <= mid <= 4.3 else pcm([(0.256, 3000)]))
 
     out = []
     t = utils.now()

@@ -24,6 +24,7 @@ be unit-tested in isolation.
 """
 
 import math
+import re
 import threading
 from typing import List, Optional, Tuple
 
@@ -53,6 +54,46 @@ def _get_client(timeout_s: float, max_connections: int) -> httpx.Client:
                     ),
                 )
     return _client
+
+
+# Whisper's stock hallucinations on silence / noise / very short audio (subtitle
+# credits from its training data). Gensenta's whisper.cpp returns them with high
+# confidence and no_speech_prob=0, so they can only be filtered by text.
+_HALLUCINATIONS = {
+    'izlediğiniz için teşekkür ederim',
+    'izlediğiniz için teşekkürler',
+    'izlediğiniz için teşekkür ederiz',
+    'abone olmayı unutmayın',
+    'altyazı mk',
+    'altyazı m k',
+    'thank you for watching',
+    'thanks for watching',
+}
+
+
+def _norm_text(text: str) -> str:
+    text = text.replace('İ', 'i').replace('I', 'ı').lower()
+    return ' '.join(''.join(ch if ch.isalnum() else ' ' for ch in text).split())
+
+
+def is_hallucination(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    # "[Müzik]", "(alkış)", "*" ... -> nothing but annotations / symbols
+    if not any(ch.isalnum() for ch in re.sub(r'\[[^\]]*\]|\([^)]*\)', ' ', stripped)):
+        return True
+    return _norm_text(stripped) in _HALLUCINATIONS
+
+
+def _drop_hallucinated_segments(payload: dict) -> dict:
+    segments = payload.get('segments') or []
+    kept = [s for s in segments if not is_hallucination(str(s.get('text', '')))]
+    if len(kept) == len(segments) and not is_hallucination(str(payload.get('text', ''))):
+        return payload
+    log.debug(f'whisper api: dropped hallucinated segment(s): {payload.get("text", "")!r}')
+    text = '' if not kept else ''.join(str(s.get('text', '')) for s in kept)
+    return {**payload, 'segments': kept, 'text': text, 'words': [] if len(kept) != len(segments) else payload.get('words')}
 
 
 def _clamp_prob(value: float) -> float:
@@ -98,6 +139,68 @@ def _restore_punctuation(words: List[dict], text: str) -> None:
             word['word'] = f' {token}'
 
 
+def snap_cut_to_quiet(
+    pcm: bytes,
+    target_s: float,
+    *,
+    sample_rate: int = 16000,
+    max_shift_s: float = 0.6,
+    frame_ms: int = 20,
+    min_quiet_ms: int = 80,
+) -> Optional[float]:
+    """
+    Remote Whisper servers (whisper.cpp) return word timestamps that can be off
+    by a few hundred ms. Cutting the buffer exactly at such a timestamp splits a
+    word: its tail is transcribed again in the next buffer (duplicated word) or
+    lost (truncated word). This moves the cut to the middle of the closest
+    really quiet stretch of the audio (energy based, relative to this buffer's
+    own noise floor) within +-max_shift_s of the requested position.
+
+    Returns the cut position in seconds, or None when there is no quiet stretch
+    nearby -> the caller should not cut now (the phrase is finalised later by
+    the next pause, the silence flush or the max-buffer guard).
+    """
+    import numpy as np
+
+    samples = np.frombuffer(pcm[: len(pcm) - len(pcm) % 2], dtype=np.int16).astype(np.float32)
+    frame = sample_rate * frame_ms // 1000
+    n_frames = len(samples) // frame
+    if n_frames < 5:
+        return None
+    rms = np.sqrt(np.mean(samples[: n_frames * frame].reshape(n_frames, frame) ** 2, axis=1))
+    # noise floor = quietest 3-frame stretch (a pause can be far shorter than
+    # 10 % of the buffer, so a percentile would miss it); smoothing ignores
+    # single-frame dropouts inside words
+    smoothed = np.convolve(rms, np.ones(3) / 3, mode='valid')
+    floor, loud = float(smoothed.min()), float(np.percentile(rms, 90))
+    if loud <= 0 or loud - floor < 1e-6:
+        return None
+    quiet = rms <= floor + 0.15 * (loud - floor)
+
+    min_frames = max(1, min_quiet_ms // frame_ms)
+    total_s = n_frames * frame_ms / 1000
+    # prefer the LONGEST quiet stretch in the window (a sentence pause beats a
+    # short gap between two words), then the one closest to the target
+    best, best_key = None, None
+    i = 0
+    while i < n_frames:
+        if not quiet[i]:
+            i += 1
+            continue
+        j = i
+        while j < n_frames and quiet[j]:
+            j += 1
+        if j - i >= min_frames:
+            mid = (i + j) / 2 * frame_ms / 1000
+            dist = abs(mid - target_s)
+            key = (j - i, -dist)
+            # never cut at the very start / end of the buffer
+            if dist <= max_shift_s and 0.2 < mid < total_s - 0.05 and (best_key is None or key > best_key):
+                best, best_key = mid, key
+        i = j
+    return None if best is None else round(best, 3)
+
+
 def _merge_segment_tokens(segments: List[dict], default_probability: float) -> List[dict]:
     """
     Merge whisper.cpp style sub-word tokens from `segments[].words` into words.
@@ -135,6 +238,7 @@ def normalise_response(
     payload: dict, audio_duration_s: float, default_probability: float
 ) -> Tuple[str, List[dict]]:
     """Return (text, words[]) where each word has word/start/end/probability."""
+    payload = _drop_hallucinated_segments(payload)
     text = (payload.get('text') or '').strip()
     segments = payload.get('segments') or []
     raw_words = payload.get('words') or []

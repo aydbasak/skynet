@@ -40,7 +40,11 @@ services:
       - WHISPER_API_LANGUAGE=${WHISPER_API_LANGUAGE:-tr}
       - WHISPER_API_TIMEOUT=${WHISPER_API_TIMEOUT:-30}
       - WHISPER_API_WORD_TIMESTAMPS=${WHISPER_API_WORD_TIMESTAMPS:-true}
-      - WHISPER_API_MIN_INTERVAL_MS=${WHISPER_API_MIN_INTERVAL_MS:-1500}
+      # measured 2026-11-11 on Gensenta's gateway (~0.2 s/request): 750 ms gives
+      # ~0.5 s first interim; prompt off avoids whisper.cpp continuing patterns
+      # from previous finals (e.g. inventing '3. Bulgu')
+      - WHISPER_API_MIN_INTERVAL_MS=${WHISPER_API_MIN_INTERVAL_MS:-750}
+      - WHISPER_API_SEND_PROMPT=${WHISPER_API_SEND_PROMPT:-false}
       - WHISPER_API_MAX_BUFFER_S=${WHISPER_API_MAX_BUFFER_S:-20}
       - WHISPER_API_MAX_CONNECTIONS=${WHISPER_API_MAX_CONNECTIONS:-16}
       - WHISPER_MIN_PROBABILITY=0.5

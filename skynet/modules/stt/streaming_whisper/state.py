@@ -15,9 +15,15 @@ from skynet.logs import get_logger
 from skynet.modules.monitoring import TRANSCRIBE_DURATION_METRIC
 import skynet.modules.stt.streaming_whisper.cfg as cfg
 from skynet.modules.stt.streaming_whisper.chunk import Chunk
-from skynet.modules.stt.streaming_whisper.utils import utils
+from skynet.modules.stt.streaming_whisper.utils import api_client, utils
 
 log = get_logger(__name__)
+
+# API mode: below these lengths the remote Whisper returns garbage / stock
+# hallucinations (measured on Gensenta's endpoint: 0.25 s -> wrong word,
+# 0.5 s -> correct word, silence -> 'İzlediğiniz için teşekkür ederim.')
+API_MIN_INTERIM_S = 0.5
+API_MIN_FINAL_S = 1.0
 
 
 class State:
@@ -110,9 +116,73 @@ class State:
             )
         return results
 
+    async def _process_api(self, ts_result: utils.WhisperResult, previous_tokens) -> List[utils.TranscriptionResponse]:
+        """
+        API mode counterpart of _extract_transcriptions (same cut-mark rule).
+
+        Remote (whisper.cpp) word timestamps can be off by more than 0.5 s, so
+        neither the cut position nor the split of the text relies on them:
+        - the cut is moved into real silence of the audio (or not done at all),
+        - the final's text is obtained by transcribing exactly the audio that is
+          cut away, so text and audio always match (no lost / repeated words).
+        """
+        words = ts_result.words
+        if not words:
+            return []
+
+        def interim_payload() -> List[utils.TranscriptionResponse]:
+            return [self.get_response_payload(self._join(words), self.working_audio_starts_at + int(words[0].start * 1000))]
+
+        last_pause = utils.get_cut_mark_from_segment_probability(ts_result)
+        if last_pause.end <= 0 or not any(w.end < last_pause.end for w in words):
+            return interim_payload()
+
+        snapped = api_client.snap_cut_to_quiet(self.working_audio, (last_pause.start + last_pause.end) / 2)
+        cut_bytes = self.get_num_bytes_for_slicing(snapped) if snapped is not None else 0
+        # a head shorter than API_MIN_FINAL_S is not worth a final: short audio is
+        # where Whisper hallucinates; it is finalised with the next pause instead
+        if cut_bytes < utils.convert_seconds_to_bytes(API_MIN_FINAL_S) or cut_bytes >= len(self.working_audio):
+            log.debug(f'Participant {self.participant_id}: no usable quiet cut near {last_pause.end}s, not cutting')
+            return interim_payload()
+
+        final_result = await self.do_transcription(self.working_audio[:cut_bytes], previous_tokens)
+        final_words = final_result.words if final_result else []
+        if not final_words:
+            # head not transcribable on its own: keep everything as interim, retry later
+            return interim_payload()
+        log.debug(f'Participant {self.participant_id}: cut {last_pause.end}s snapped to quiet {snapped}s')
+
+        final_start_timestamp = self.working_audio_starts_at + int(final_words[0].start * 1000)
+        timeline_before_trim = self.working_audio_starts_at
+        final_raw_audio = self.trim_working_audio(cut_bytes)
+        final_audio = None
+        if return_audio:
+            final_audio_length = utils.convert_bytes_to_seconds(final_raw_audio)
+            final_audio = utils.get_wav_header([final_raw_audio], final_audio_length) + final_raw_audio
+        results = [
+            self.get_response_payload(
+                self._join(final_words),
+                final_start_timestamp,
+                final_audio,
+                True,
+                probability=utils.get_phrase_prob(len(final_words) - 1, final_words),
+            )
+        ]
+        # remaining audio keeps its place on the meeting timeline; its interim
+        # comes with the next request
+        if self.working_audio:
+            self.working_audio_starts_at = timeline_before_trim + int(utils.convert_bytes_to_seconds(final_raw_audio) * 1000)
+        return results
+
+    @staticmethod
+    def _join(words) -> str:
+        return ''.join(w.word if w.word.startswith(' ') else f' {w.word}' for w in words).strip()
+
     async def force_transcription(self, previous_tokens) -> List[utils.TranscriptionResponse] | None:
         results = None
         if self.is_transcribing:
+            return results
+        if cfg.use_api and not self.working_audio:
             return results
         ts_result = await self.do_transcription(self.working_audio, previous_tokens)
         if ts_result is None:
@@ -143,14 +213,22 @@ class State:
 
     async def process(self, chunk: Chunk, previous_tokens: list[int]) -> List[utils.TranscriptionResponse] | None:
         await self.add_to_store(chunk, self.working_audio + chunk.raw)
-        if cfg.use_api and not self.is_transcribing and self.working_audio:
+        if cfg.use_api:
+            # nothing (or too little) to send: no request. The API rejects empty
+            # audio and hallucinates on very short clips
+            if self.is_transcribing or utils.convert_bytes_to_seconds(self.working_audio) < API_MIN_INTERIM_S:
+                return None
             # bound request size / latency: emit everything as final
             if utils.convert_bytes_to_seconds(self.working_audio) >= whisper_api_max_buffer_s:
                 log.debug(f'Participant {self.participant_id}: max buffer reached, forcing final')
                 return await self.force_transcription(previous_tokens)
             # throttle interim requests to the remote API
-            if utils.now() - self.last_transcription_at < whisper_api_min_interval_ms:
+            if self.long_silence or utils.now() - self.last_transcription_at < whisper_api_min_interval_ms:
                 return None
+            ts_result = await self.do_transcription(self.working_audio, previous_tokens)
+            if ts_result is None:
+                return None
+            return await self._process_api(ts_result, previous_tokens) or None
         if not self.long_silence and not self.is_transcribing:
             ts_result = await self.do_transcription(self.working_audio, previous_tokens)
             if ts_result is None:
