@@ -109,6 +109,27 @@ whisper_max_finals_in_initial_prompt = int(os.environ.get('WHISPER_MAX_FINALS_IN
 # The period in milliseconds to flush the buffer after no new spoken audio is detected
 whisper_flush_interval = int(os.environ.get('WHISPER_FLUSH_BUFFER_INTERVAL', 2000))
 
+# Whisper backend: 'local' (faster-whisper on CPU/GPU, default) or 'api'
+# (remote OpenAI-compatible POST {WHISPER_API_URL}/audio/transcriptions)
+whisper_backend = os.environ.get('WHISPER_BACKEND', 'local').strip().lower()
+whisper_api_url = os.environ.get('WHISPER_API_URL', '')
+whisper_api_key = os.environ.get('WHISPER_API_KEY')
+whisper_api_model = os.environ.get('WHISPER_API_MODEL', 'whisper')
+# Force a fixed language (e.g. 'tr'); empty = use the language sent by Jigasi
+whisper_api_language = os.environ.get('WHISPER_API_LANGUAGE', '')
+whisper_api_timeout = float(os.environ.get('WHISPER_API_TIMEOUT', 30))
+whisper_api_max_connections = int(os.environ.get('WHISPER_API_MAX_CONNECTIONS', 16))
+# Request verbose_json + word timestamps (needed for precise sentence cuts)
+whisper_api_word_timestamps = tobool(os.environ.get('WHISPER_API_WORD_TIMESTAMPS', 'true'))
+# Minimum time between two interim transcriptions of the same participant
+whisper_api_min_interval_ms = int(os.environ.get('WHISPER_API_MIN_INTERVAL_MS', 1500))
+# Force a final when a participant's buffer exceeds this many seconds
+whisper_api_max_buffer_s = float(os.environ.get('WHISPER_API_MAX_BUFFER_S', 20))
+# Word probability used when the API does not return one
+whisper_api_default_probability = float(os.environ.get('WHISPER_API_DEFAULT_PROBABILITY', 0.8))
+# Send previous finals as `prompt` for context
+whisper_api_send_prompt = tobool(os.environ.get('WHISPER_API_SEND_PROMPT', 'true'))
+
 # Transcript saving settings
 streaming_whisper_save_transcripts = tobool(os.environ.get('STREAMING_WHISPER_SAVE_TRANSCRIPTS', 'false'))
 streaming_whisper_output_dir = os.environ.get('STREAMING_WHISPER_OUTPUT_DIR', '/tmp/transcripts')

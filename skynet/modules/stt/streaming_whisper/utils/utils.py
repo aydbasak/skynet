@@ -21,6 +21,15 @@ from uuid6 import UUID
 
 import skynet.modules.stt.streaming_whisper.cfg as cfg
 from skynet.env import (
+    whisper_api_default_probability,
+    whisper_api_key,
+    whisper_api_language,
+    whisper_api_max_connections,
+    whisper_api_model,
+    whisper_api_send_prompt,
+    whisper_api_timeout,
+    whisper_api_url,
+    whisper_api_word_timestamps,
     whisper_beam_size, 
     whisper_min_probability,
     vad_threshold,
@@ -32,6 +41,7 @@ from skynet.env import (
     streaming_whisper_output_formats,
 )
 from skynet.logs import get_logger
+from skynet.modules.stt.streaming_whisper.utils import api_client
 
 log = get_logger(__name__)
 
@@ -85,6 +95,15 @@ class WhisperResult:
         self.segments = [WhisperSegment.model_validate(segment._asdict()) for segment in ts_result]
         self.words = [WhisperWord.model_validate(word._asdict()) for segment in ts_result for word in segment.words]
         self.confidence = self.get_confidence()
+
+    @classmethod
+    def from_api(cls, text: str, words: list[dict]) -> 'WhisperResult':
+        """Build a result from the normalised remote API response (no segments)."""
+        obj = cls([])
+        obj.text = f' {text.strip()}' if text.strip() else ''
+        obj.words = [WhisperWord.model_validate(word) for word in words]
+        obj.confidence = obj.get_confidence()
+        return obj
 
     def __str__(self):
         return (
@@ -334,10 +353,35 @@ def now() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def transcribe_api(audio_bytes: bytes, lang: str, prompt: str | None) -> WhisperResult:
+    duration = convert_bytes_to_seconds(audio_bytes)
+    wav = get_wav_header([audio_bytes], chunk_duration_s=duration) + audio_bytes
+    text, words = api_client.transcribe_wav(
+        wav,
+        duration,
+        url=whisper_api_url,
+        api_key=whisper_api_key,
+        model=whisper_api_model,
+        language=whisper_api_language or lang,
+        prompt=prompt if whisper_api_send_prompt else None,
+        word_timestamps=whisper_api_word_timestamps,
+        timeout_s=whisper_api_timeout,
+        max_connections=whisper_api_max_connections,
+        default_probability=whisper_api_default_probability,
+    )
+    ts_obj = WhisperResult.from_api(text, words)
+    log.debug(f'API transcription results: {ts_obj}')
+    return ts_obj
+
+
 def transcribe(buffer_list: List[bytes], lang: str = 'en', previous_tokens=None) -> WhisperResult:
+    audio_bytes = b''.join(buffer_list)
+    if cfg.use_api:
+        # in API mode previous_tokens carries the previous finals as plain text
+        prompt = previous_tokens if isinstance(previous_tokens, str) and previous_tokens.strip() else None
+        return transcribe_api(audio_bytes, lang, prompt)
     if previous_tokens is None:
         previous_tokens = []
-    audio_bytes = b''.join(buffer_list)
     audio = load_audio(audio_bytes)
     iterator, _ = cfg.model.transcribe(
         audio,

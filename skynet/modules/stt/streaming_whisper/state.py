@@ -4,6 +4,8 @@ import time
 from typing import List
 
 from skynet.env import (
+    whisper_api_max_buffer_s,
+    whisper_api_min_interval_ms,
     whisper_return_transcribed_audio as return_audio,
     vad_min_speech_duration,
     vad_min_silence_duration
@@ -11,6 +13,7 @@ from skynet.env import (
 
 from skynet.logs import get_logger
 from skynet.modules.monitoring import TRANSCRIBE_DURATION_METRIC
+import skynet.modules.stt.streaming_whisper.cfg as cfg
 from skynet.modules.stt.streaming_whisper.chunk import Chunk
 from skynet.modules.stt.streaming_whisper.utils import utils
 
@@ -44,6 +47,7 @@ class State:
         self.last_received_chunk = utils.now()
         self.is_transcribing = False
         self.last_speech_timestamp = 0.0
+        self.last_transcription_at = 0
 
     def _extract_transcriptions(
         self, last_pause: utils.CutMark, ts_result: utils.WhisperResult
@@ -111,7 +115,14 @@ class State:
         if self.is_transcribing:
             return results
         ts_result = await self.do_transcription(self.working_audio, previous_tokens)
-        if ts_result.text.strip():
+        if ts_result is None:
+            # transcription failed: keep the audio so the next flush retries,
+            # unless the buffer has grown far beyond the normal limit
+            if utils.convert_bytes_to_seconds(self.working_audio) > 2 * whisper_api_max_buffer_s:
+                log.warning(f'Participant {self.participant_id}: dropping buffer after repeated failures')
+                self.reset()
+            return results
+        if ts_result.text.strip() and ts_result.words:
             results = []
             start_timestamp = int(ts_result.words[0].start * 1000) + self.working_audio_starts_at
             final_audio = None
@@ -132,8 +143,18 @@ class State:
 
     async def process(self, chunk: Chunk, previous_tokens: list[int]) -> List[utils.TranscriptionResponse] | None:
         await self.add_to_store(chunk, self.working_audio + chunk.raw)
+        if cfg.use_api and not self.is_transcribing and self.working_audio:
+            # bound request size / latency: emit everything as final
+            if utils.convert_bytes_to_seconds(self.working_audio) >= whisper_api_max_buffer_s:
+                log.debug(f'Participant {self.participant_id}: max buffer reached, forcing final')
+                return await self.force_transcription(previous_tokens)
+            # throttle interim requests to the remote API
+            if utils.now() - self.last_transcription_at < whisper_api_min_interval_ms:
+                return None
         if not self.long_silence and not self.is_transcribing:
             ts_result = await self.do_transcription(self.working_audio, previous_tokens)
+            if ts_result is None:
+                return None
             last_pause = utils.get_cut_mark_from_segment_probability(ts_result)
             results = self._extract_transcriptions(last_pause, ts_result)
             if len(results) > 0:
@@ -237,6 +258,7 @@ class State:
 
     async def do_transcription(self, audio: bytes, previous_tokens: list[int]) -> utils.WhisperResult | None:
         self.is_transcribing = True
+        self.last_transcription_at = utils.now()
         start = time.perf_counter_ns()
         loop = asyncio.get_running_loop()
         log.debug(f'Participant {self.participant_id}: starting transcription of {len(audio)} bytes.')

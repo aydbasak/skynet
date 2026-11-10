@@ -8,7 +8,7 @@ from starlette.websockets import WebSocket
 from skynet.env import whisper_max_finals_in_initial_prompt as max_finals
 
 from skynet.logs import get_logger
-from skynet.modules.stt.streaming_whisper.cfg import model
+from skynet.modules.stt.streaming_whisper.cfg import model, use_api
 from skynet.modules.stt.streaming_whisper.chunk import Chunk
 from skynet.modules.stt.streaming_whisper.state import State
 from skynet.modules.stt.streaming_whisper.utils import utils
@@ -32,6 +32,15 @@ class MeetingConnection:
         self.tokenizer = None
 
     async def update_initial_prompt(self, previous_payloads: list[utils.TranscriptionResponse]):
+        if use_api:
+            # API mode: keep the last finals as plain text, sent as `prompt`
+            for payload in previous_payloads:
+                if payload.type == 'final' and not any(p in payload.text for p in utils.black_listed_prompts):
+                    self.previous_transcription_store.append(payload.text.strip())
+                    while len(self.previous_transcription_store) > max_finals:
+                        self.previous_transcription_store.pop(0)
+                    self.previous_transcription_tokens = ' '.join(self.previous_transcription_store)
+            return
         for payload in previous_payloads:
             if payload.type == 'final' and not any(prompt in payload.text for prompt in utils.black_listed_prompts):
                 self.previous_transcription_store.append(self.tokenizer.encode(f' {payload.text.strip()}'))
@@ -46,6 +55,7 @@ class MeetingConnection:
         # The first chunk sets the meeting language and initializes the Tokenizer
         if not self.meeting_language:
             self.meeting_language = a_chunk.language
+        if self.tokenizer is None and not use_api:
             self.tokenizer = Tokenizer(
                 model.hf_tokenizer, multilingual=False, task='transcribe', language=self.meeting_language
             )
